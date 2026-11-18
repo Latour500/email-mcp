@@ -83,6 +83,21 @@ public interface EmailConfig {
 		 * {@link #draftsFolder()}, overridable with the setTrashFolder tool.
 		 */
 		Optional<String> trashFolder();
+
+		/**
+		 * Full IMAP name of the Sent folder that a copy of every sent message is saved to. Same
+		 * semantics as {@link #draftsFolder()}, overridable with the setSentFolder tool.
+		 */
+		Optional<String> sentFolder();
+
+		/**
+		 * Save a copy of every message sent by sendEmail, replyEmail and forwardEmail to the Sent
+		 * folder, as a mail client does. Turn it off for providers that already file sent messages
+		 * themselves, such as Gmail, to avoid duplicates.
+		 * {@code EMAIL_ACCOUNTS_<NAME>_SAVE_TO_SENT} in the environment.
+		 */
+		@WithDefault("true")
+		boolean saveToSent();
 	}
 
 	interface ImapConfig {

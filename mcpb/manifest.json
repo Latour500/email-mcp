@@ -4,7 +4,7 @@
   "display_name": "Email MCP Server",
   "version": "__VERSION__",
   "description": "Read, search, triage, file and draft email over IMAP and SMTP: your mailbox as tools for Claude.",
-  "long_description": "Exposes common email operations as tools: list folders, search and read messages including attachments (text is extracted from PDFs), move and flag messages, and save drafts. Credentials stay on your machine; the model only sees tool descriptions and the text the tools return. Sending and permanent deletion are off by default and can be switched on in the extension settings. The bundle configures one account, named default; more accounts can be added with the manual configuration described in the README.",
+  "long_description": "Exposes common email operations as tools: list folders, search and read messages including attachments (text is extracted from PDFs), move and flag messages, and save drafts. Credentials stay on your machine; the model only sees tool descriptions and the text the tools return. Sending and permanent deletion are off by default and can be switched on in the extension settings. Once sending is on, a copy of every sent message is saved to the Sent folder, unless that is turned off in the settings, as it should be for Gmail, which saves one already. The bundle configures one account, named default; more accounts can be added with the manual configuration described in the README.",
   "author": {
     "name": "Marcus Hirt",
     "url": "https://www.hirt.se"
@@ -47,6 +47,8 @@
         "EMAIL_ACCOUNTS_DEFAULT_DRAFTS_FOLDER": "${user_config.drafts_folder}",
         "EMAIL_ACCOUNTS_DEFAULT_SPAM_FOLDER": "${user_config.spam_folder}",
         "EMAIL_ACCOUNTS_DEFAULT_TRASH_FOLDER": "${user_config.trash_folder}",
+        "EMAIL_ACCOUNTS_DEFAULT_SENT_FOLDER": "${user_config.sent_folder}",
+        "EMAIL_ACCOUNTS_DEFAULT_SAVE_TO_SENT": "${user_config.save_to_sent}",
         "EMAIL_ALLOW_SENDING": "${user_config.allow_sending}",
         "EMAIL_ALLOW_DELETION": "${user_config.allow_deletion}"
       }
@@ -117,11 +119,24 @@
       "description": "Full IMAP name of the trash folder that deleteEmail moves messages to, for example INBOX.INBOX.Trash. Leave empty to auto-detect.",
       "required": false
     },
+    "sent_folder": {
+      "type": "string",
+      "title": "Sent folder",
+      "description": "Full IMAP name of the Sent folder that a copy of every sent message is saved to, for example INBOX.INBOX.Sent. Leave empty to auto-detect.",
+      "required": false
+    },
     "allow_sending": {
       "type": "boolean",
       "title": "Allow sending",
       "description": "Let sendEmail, replyEmail and the forward tools actually transmit messages over SMTP. Off by default: those tools then explain the limitation, and saveDraft still writes to the Drafts folder for you to send yourself.",
       "default": false,
+      "required": false
+    },
+    "save_to_sent": {
+      "type": "boolean",
+      "title": "Save copy to Sent",
+      "description": "Save a copy of every message sent by sendEmail, replyEmail and the forward tools to the Sent folder, as a mail client does. On by default. Turn it off for Gmail, which already files the messages sent through its servers.",
+      "default": true,
       "required": false
     },
     "allow_deletion": {

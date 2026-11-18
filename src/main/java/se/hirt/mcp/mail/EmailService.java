@@ -61,6 +61,7 @@ public class EmailService {
 	private final Map<String, String> cachedSpamFolders = new ConcurrentHashMap<>();
 	private final Map<String, String> cachedDraftsFolders = new ConcurrentHashMap<>();
 	private final Map<String, String> cachedTrashFolders = new ConcurrentHashMap<>();
+	private final Map<String, String> cachedSentFolders = new ConcurrentHashMap<>();
 
 	// ── Account validation ──────────────────────────────────────────────
 
@@ -1021,6 +1022,87 @@ public class EmailService {
 		}
 	}
 
+	// ── Sent folder detection ──────────────────────────────────────────
+
+	// No INBOX.Sent here: on servers that nest everything under INBOX.INBOX, the leaf name pass
+	// finds the real folder.
+	private static final List<String> SENT_FOLDER_CANDIDATES = List.of("Sent", "[Gmail]/Sent Mail", "Sent Items",
+			"Sent Messages");
+	private static final List<String> SENT_FOLDER_LEAF_NAMES = List.of("Sent", "Sent Items", "Sent Messages",
+			"Sent Mail", "Skickat", "Gesendet", "Envoyés", "Éléments envoyés");
+
+	public String getSentFolder(String account) throws MessagingException {
+		return resolveSpecialFolder(account, cachedSentFolders, getAccountConfig(account).sentFolder(), "sent",
+				"setSentFolder", "\\Sent", SENT_FOLDER_CANDIDATES, SENT_FOLDER_LEAF_NAMES);
+	}
+
+	public void setSentFolder(String account, String folderName) {
+		cachedSentFolders.put(account, folderName);
+	}
+
+	/**
+	 * What became of the copy of a sent message: saved to {@code folder}, not saved because of
+	 * {@code problem}, or not saved because the account turned the copy off.
+	 */
+	public record SentCopy(String folder, String problem) {
+		static SentCopy savedTo(String folder) {
+			return new SentCopy(folder, null);
+		}
+
+		static SentCopy turnedOff() {
+			return new SentCopy(null, null);
+		}
+
+		static SentCopy failed(String folder, String problem) {
+			return new SentCopy(folder, problem);
+		}
+
+		public boolean saved() {
+			return folder != null && problem == null;
+		}
+
+		public String describe() {
+			if (problem != null) {
+				return "Copy NOT saved" + (folder != null ? " to " + folder : "") + ": " + problem;
+			}
+			if (folder == null) {
+				return "No copy saved: saving to the Sent folder is turned off for this account.";
+			}
+			return "Copy saved to " + folder + ".";
+		}
+	}
+
+	/**
+	 * Saves a copy of a message that has just been sent to the account's Sent folder, marked as
+	 * read. A failure is returned, never thrown: the message is already sent, and the send must
+	 * still be reported as such.
+	 */
+	private SentCopy saveToSent(String account, Message message) {
+		String sentName = null;
+		try {
+			if (!getAccountConfig(account).saveToSent()) {
+				return SentCopy.turnedOff();
+			}
+			sentName = getSentFolder(account);
+			if (sentName == null) {
+				return SentCopy.failed(null,
+						"no Sent folder found. Set the Sent folder (EMAIL_ACCOUNTS_<NAME>_SENT_FOLDER), or call "
+								+ "listFolderTree and setSentFolder to set it for this session.");
+			}
+			var sentFolder = getImapStore(account).getFolder(sentName);
+			sentFolder.open(Folder.READ_WRITE);
+			try {
+				message.setFlag(Flags.Flag.SEEN, true);
+				sentFolder.appendMessages(new Message[] {message});
+			} finally {
+				sentFolder.close(false);
+			}
+			return SentCopy.savedTo(sentName);
+		} catch (Exception e) {
+			return SentCopy.failed(sentName, e.getMessage() != null ? e.getMessage() : e.getClass().getName());
+		}
+	}
+
 	// ── Send email ───────────────────────────────────────────────────────
 
 	private MimeMessage buildSmtpMessage(String account) throws MessagingException {
@@ -1055,7 +1137,7 @@ public class EmailService {
 		return message;
 	}
 
-	public void sendEmail(String account, String to, String cc, String bcc, String subject, String body)
+	public SentCopy sendEmail(String account, String to, String cc, String bcc, String subject, String body)
 			throws MessagingException {
 		var message = buildSmtpMessage(account);
 		message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to));
@@ -1068,9 +1150,10 @@ public class EmailService {
 		message.setSubject(subject);
 		message.setText(body);
 		Transport.send(message);
+		return saveToSent(account, message);
 	}
 
-	public void replyEmail(
+	public SentCopy replyEmail(
 		String account, String folderName, long uid, String body, boolean replyAll, String extraCc, String extraBcc)
 			throws MessagingException {
 		var ac = getAccountConfig(account);
@@ -1141,6 +1224,7 @@ public class EmailService {
 
 			reply.setText(body);
 			Transport.send(reply);
+			return saveToSent(account, reply);
 		} finally {
 			folder.close(false);
 		}
@@ -1148,7 +1232,7 @@ public class EmailService {
 
 	// ── Forward email ────────────────────────────────────────────────────
 
-	public void forwardEmail(String account, String folderName, long uid, String to, String comment)
+	public SentCopy forwardEmail(String account, String folderName, long uid, String to, String comment)
 			throws MessagingException {
 		var store = getImapStore(account);
 		var folder = store.getFolder(folderName);
@@ -1182,6 +1266,7 @@ public class EmailService {
 
 			forward.setContent(multipart);
 			Transport.send(forward);
+			return saveToSent(account, forward);
 		} finally {
 			folder.close(false);
 		}

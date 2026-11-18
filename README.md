@@ -59,11 +59,13 @@ For more information, see my [blog](https://hirt.se/blog/?p=1596).
 | **Composing** | |
 | `getDraftsFolder` | Resolve and cache the Drafts folder that `saveDraft` writes to (see [Special folders](#special-folders)) |
 | `setDraftsFolder` | Override the Drafts folder for this session |
+| `getSentFolder` | Resolve and cache the Sent folder that the send tools save a copy to (see [Special folders](#special-folders)) |
+| `setSentFolder` | Override the Sent folder for this session |
 | `saveDraft` | Save a draft email for user review with CC/BCC (always available; preferred over send) |
-| `sendEmail` | Send an email via SMTP with CC/BCC. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` (see [Enabling outbound sending](#enabling-outbound-sending)) |
-| `replyEmail` | Reply with proper threading headers and optional CC/BCC. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
-| `forwardEmail` | Verbatim forward (body never enters LLM context). **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
-| `forwardEmailWithComment` | Forward with a comment prepended. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
+| `sendEmail` | Send an email via SMTP with CC/BCC, then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` (see [Enabling outbound sending](#enabling-outbound-sending)) |
+| `replyEmail` | Reply with proper threading headers and optional CC/BCC, then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
+| `forwardEmail` | Verbatim forward (body never enters LLM context), then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
+| `forwardEmailWithComment` | Forward with a comment prepended, then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
 
 All tools (except `listAccounts`) require an `account` parameter — the name of the account to operate on (e.g., `work`, `gmail`).
 
@@ -134,6 +136,8 @@ Accounts are defined by convention: `EMAIL_ACCOUNTS_<NAME>_IMAP_*` and `EMAIL_AC
 | `EMAIL_ACCOUNTS_<NAME>_DRAFTS_FOLDER` | no | auto-detected | `INBOX.INBOX.Drafts` |
 | `EMAIL_ACCOUNTS_<NAME>_SPAM_FOLDER` | no | auto-detected | `INBOX.INBOX.Junk` |
 | `EMAIL_ACCOUNTS_<NAME>_TRASH_FOLDER` | no | auto-detected | `INBOX.INBOX.Trash` |
+| `EMAIL_ACCOUNTS_<NAME>_SENT_FOLDER` | no | auto-detected | `INBOX.INBOX.Sent` |
+| `EMAIL_ACCOUNTS_<NAME>_SAVE_TO_SENT` | no | `true` | `false` for Gmail |
 
 For Gmail, create an [App Password](https://myaccount.google.com/apppasswords).
 
@@ -162,20 +166,24 @@ port rule. Set `SMTP_STARTTLS=false` only for a server that really has no TLS at
 
 ### Special folders
 
-`saveDraft`, `moveToSpam` and `deleteEmail` need to know the account's Drafts, spam and trash folders. Most
-servers need no configuration; each folder is resolved on first use, in this order:
+`saveDraft`, `moveToSpam` and `deleteEmail` need to know the account's Drafts, spam and trash folders, and the
+send tools its Sent folder. Most servers need no configuration; each folder is resolved on first use, in this
+order:
 
-1. A folder set for the current session with `setDraftsFolder` / `setSpamFolder` / `setTrashFolder`.
-2. The configured `EMAIL_ACCOUNTS_<NAME>_DRAFTS_FOLDER` / `_SPAM_FOLDER` / `_TRASH_FOLDER`. A configured
-   folder that does not exist on the server is reported as an error rather than silently falling back, so
-   the LLM can point out the misconfiguration and work around it with the `set*Folder` tool for the session.
-3. The folder the server flags as `\Drafts` / `\Junk` / `\Trash` (RFC 6154 special-use, supported by Gmail,
-   Dovecot, Exchange and most others).
+1. A folder set for the current session with `setDraftsFolder` / `setSpamFolder` / `setTrashFolder` /
+   `setSentFolder`.
+2. The configured `EMAIL_ACCOUNTS_<NAME>_DRAFTS_FOLDER` / `_SPAM_FOLDER` / `_TRASH_FOLDER` / `_SENT_FOLDER`. A
+   configured folder that does not exist on the server is reported as an error rather than silently falling
+   back, so the LLM can point out the misconfiguration and work around it with the `set*Folder` tool for the
+   session.
+3. The folder the server flags as `\Drafts` / `\Junk` / `\Trash` / `\Sent` (RFC 6154 special-use, supported
+   by Gmail, Dovecot, Exchange and most others).
 4. Well-known names such as `Drafts`, `[Gmail]/Drafts`, `INBOX.Drafts`, `Spam`, `Junk`, `[Gmail]/Spam`,
-   `Trash`, `[Gmail]/Trash`, `Deleted Items`.
+   `Trash`, `[Gmail]/Trash`, `Deleted Items`, `Sent`, `[Gmail]/Sent Mail`, `Sent Items`, `Sent Messages`.
 5. Any folder whose last path element is `Drafts`, `Draft`, `Spam`, `Junk`, `Junk E-mail`, `Bulk Mail`,
-   `Junk Email`, `Trash`, `Deleted Items`, `Deleted Messages` or a few localized trash names, which covers
-   providers that nest everything under a namespace prefix (e.g. OVH's `INBOX.INBOX.Drafts`).
+   `Junk Email`, `Trash`, `Deleted Items`, `Deleted Messages`, `Sent`, `Sent Items`, `Sent Messages`,
+   `Sent Mail` or a few localized trash and sent names, which covers providers that nest everything under a
+   namespace prefix (e.g. OVH's `INBOX.INBOX.Drafts`).
 
 Set the variable explicitly if your provider uses a name none of the heuristics find, or if auto-detection
 picks the wrong folder. `deleteEmail` removes the message permanently only when no trash folder is found.
@@ -212,6 +220,18 @@ When `EMAIL_ALLOW_DELETION` is unset (or `false`), `deleteEmail` is still listed
 
 When `EMAIL_ALLOW_SENDING` is unset (or `false`), the four outbound tools above all return an explanatory error and do nothing. **`saveDraft` is unaffected** — it only writes to the IMAP Drafts folder (see [Special folders](#special-folders)), so the LLM can still compose messages for the user to review and send manually from their mail client. This is the recommended default workflow even when sending is enabled.
 
+#### Copy of sent messages
+
+When sending is enabled, every message sent by `sendEmail`, `replyEmail`, `forwardEmail` and
+`forwardEmailWithComment` is then saved to the account's Sent folder (see [Special folders](#special-folders)),
+marked as read, as a mail client does. The copy is the message that was sent, with the same Message-ID, and it
+keeps the Bcc header, which the recipients do not see. A copy that cannot be saved does not fail the send,
+since the message is already gone: the tool result says where the copy was saved, or why it was not.
+
+The copy is on by default. Gmail already files the messages sent through its servers in its Sent folder, so
+turn the copy off for a Gmail account with `EMAIL_ACCOUNTS_<NAME>_SAVE_TO_SENT=false`, or *Save copy to Sent*
+in the Claude Desktop extension settings.
+
 ## Setting up with Claude Desktop
 
 The easiest way is the MCP Bundle. There is no config file to edit:
@@ -229,9 +249,10 @@ The easiest way is the MCP Bundle. There is no config file to edit:
    username and password (passwords go to the operating system keychain). For Gmail, use an
    [App Password](https://myaccount.google.com/apppasswords). The optional fields can usually stay empty:
    *From* only if the SMTP username is not your email address or you want a display name, and the
-   *Drafts*, *Spam* and *Trash folder* fields only for providers where auto-detection picks the wrong folder
-   (see [Special folders](#special-folders)). Leave the two switches, *Allow sending* and
-   *Allow permanent deletion*, off unless you need them. Save.
+   *Drafts*, *Spam*, *Trash* and *Sent folder* fields only for providers where auto-detection picks the wrong
+   folder (see [Special folders](#special-folders)). Leave the two switches, *Allow sending* and
+   *Allow permanent deletion*, off unless you need them. *Save copy to Sent* is on by default and only matters
+   once sending is allowed: turn it off for Gmail (see [Copy of sent messages](#copy-of-sent-messages)). Save.
 
 4. Make sure the extension is enabled and start a new chat. The email tools appear in the tool list; the
    account is called `default` in the tools.

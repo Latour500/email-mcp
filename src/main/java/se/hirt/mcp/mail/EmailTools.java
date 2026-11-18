@@ -90,6 +90,11 @@ public class EmailTools {
 		return new ToolCallException(context + ": " + e.getMessage(), e);
 	}
 
+	/** Shared by the description of every tool that sends. */
+	private static final String SENT_COPY_DESCRIPTION = "After sending, a copy is saved to the account's Sent folder "
+			+ "(see getSentFolder), unless the account turned that off. The result says where the copy was saved, "
+			+ "or why it was not. A failed copy does not undo the send: the message is already gone. ";
+
 	private String sendingDisabledMessage(String operation) {
 		return "Error: " + operation + " is disabled. Outbound email sending is opt-in for safety. "
 				+ "To enable, the server administrator must set the environment variable "
@@ -543,6 +548,40 @@ public class EmailTools {
 		return setSpecialFolder(account, folderName, "Trash", emailService::setTrashFolder);
 	}
 
+	@Tool(description = "Get the Sent folder that sendEmail, replyEmail and forwardEmail save a copy of each sent "
+			+ "message to for this account. "
+			+ "Uses the configured folder if one is set, otherwise auto-detects on first call via the server's "
+			+ "\\Sent special-use flag, then well-known names such as Sent, [Gmail]/Sent Mail or Sent Items. "
+			+ "If the configured folder does not exist, or auto-detection fails, call listFolderTree to find the "
+			+ "right folder and setSentFolder to set it for this session. "
+			+ "Call listAccounts first to discover available accounts.")
+	String getSentFolder(@ToolArg(description = "Account name, e.g. 'work' or 'gmail'")
+	String account) {
+		try {
+			var folder = emailService.getSentFolder(account);
+			if (folder == null) {
+				throw new ToolCallException(
+						"Could not auto-detect a Sent folder. Call listFolderTree to find the right folder name "
+								+ "and setSentFolder to set it for this session. The user can make it permanent with "
+								+ "EMAIL_ACCOUNTS_<NAME>_SENT_FOLDER.");
+			}
+			return folder;
+		} catch (Exception e) {
+			throw failure("Error", e);
+		}
+	}
+
+	@Tool(description = "Set the Sent folder for this session if the configured folder is wrong or "
+			+ "auto-detection picked the wrong one. The folder must exist; use listFolderTree to find its full name. "
+			+ "The override lasts until the server restarts; tell the user to set "
+			+ "EMAIL_ACCOUNTS_<NAME>_SENT_FOLDER to make it permanent. "
+			+ "Call listAccounts first to discover available accounts.")
+	String setSentFolder(@ToolArg(description = "Account name, e.g. 'work' or 'gmail'")
+	String account, @ToolArg(description = "Full folder name, e.g. [Gmail]/Sent Mail or INBOX.INBOX.Sent")
+	String folderName) {
+		return setSpecialFolder(account, folderName, "Sent", emailService::setSentFolder);
+	}
+
 	private String setSpecialFolder(
 		String account, String folderName, String kind, java.util.function.BiConsumer<String, String> setter) {
 		if (folderName == null || folderName.isBlank()) {
@@ -714,7 +753,7 @@ public class EmailTools {
 		}
 	}
 
-	@Tool(description = "Send an email via SMTP using the specified account. "
+	@Tool(description = "Send an email via SMTP using the specified account. " + SENT_COPY_DESCRIPTION
 			+ "DISABLED BY DEFAULT — the server administrator must explicitly opt in by setting the "
 			+ "EMAIL_ALLOW_SENDING environment variable to 'true' (or -Demail.allow-sending=true). "
 			+ "When disabled, this tool returns an error and no message is sent; use saveDraft instead so the user "
@@ -736,9 +775,9 @@ public class EmailTools {
 			throw new ToolCallException(sendingDisabledMessage("sendEmail"));
 		}
 		try {
-			emailService.sendEmail(account, to, cc != null && !cc.isBlank() ? cc : null,
+			var copy = emailService.sendEmail(account, to, cc != null && !cc.isBlank() ? cc : null,
 					bcc != null && !bcc.isBlank() ? bcc : null, subject, body);
-			return "Email sent to " + to;
+			return "Email sent to " + to + ". " + copy.describe();
 		} catch (Exception e) {
 			throw failure("Error sending email", e);
 		}
@@ -965,7 +1004,7 @@ public class EmailTools {
 	}
 
 	@Tool(description = "Reply to an email with proper threading headers (In-Reply-To, References). "
-			+ "DISABLED BY DEFAULT — opt in by setting EMAIL_ALLOW_SENDING=true "
+			+ SENT_COPY_DESCRIPTION + "DISABLED BY DEFAULT — opt in by setting EMAIL_ALLOW_SENDING=true "
 			+ "(or -Demail.allow-sending=true). When disabled, this tool returns an error and no message is sent; "
 			+ "use saveDraft (with inReplyToFolder/inReplyToUid set) instead to create a threaded draft for the user to review. "
 			+ "Even when enabled, sends the reply immediately — prefer saveDraft to let the user review before sending. "
@@ -989,9 +1028,10 @@ public class EmailTools {
 			throw new ToolCallException(sendingDisabledMessage("replyEmail"));
 		}
 		try {
-			emailService.replyEmail(account, folder, uid, body, replyAll, cc != null && !cc.isBlank() ? cc : null,
-					bcc != null && !bcc.isBlank() ? bcc : null);
-			return "Reply sent" + (replyAll ? " to all" : "") + " for UID " + uid + " in " + folder;
+			var copy = emailService.replyEmail(account, folder, uid, body, replyAll,
+					cc != null && !cc.isBlank() ? cc : null, bcc != null && !bcc.isBlank() ? bcc : null);
+			return "Reply sent" + (replyAll ? " to all" : "") + " for UID " + uid + " in " + folder + ". "
+					+ copy.describe();
 		} catch (Exception e) {
 			throw failure("Error replying", e);
 		}
@@ -999,7 +1039,7 @@ public class EmailTools {
 
 	@Tool(description = "Forward an email verbatim to another recipient. The original message is attached as-is "
 			+ "(RFC 822 attachment) — the email body is never read into context, avoiding hallucinations and "
-			+ "prompt injection from email content. Use forwardEmailWithComment to add a note. "
+			+ "prompt injection from email content. Use forwardEmailWithComment to add a note. " + SENT_COPY_DESCRIPTION
 			+ "DISABLED BY DEFAULT — opt in by setting EMAIL_ALLOW_SENDING=true "
 			+ "(or -Demail.allow-sending=true). When disabled, this tool returns an error and no message is sent. "
 			+ "Call listAccounts first to discover available accounts. "
@@ -1014,8 +1054,8 @@ public class EmailTools {
 			throw new ToolCallException(sendingDisabledMessage("forwardEmail"));
 		}
 		try {
-			emailService.forwardEmail(account, folder, uid, to, null);
-			return "Forwarded UID " + uid + " from " + folder + " to " + to;
+			var copy = emailService.forwardEmail(account, folder, uid, to, null);
+			return "Forwarded UID " + uid + " from " + folder + " to " + to + ". " + copy.describe();
 		} catch (Exception e) {
 			throw failure("Error forwarding", e);
 		}
@@ -1024,7 +1064,7 @@ public class EmailTools {
 	@Tool(description = "Forward an email to another recipient with a comment prepended. The comment appears as "
 			+ "plain text before the original message (attached as RFC 822). The original email body is never "
 			+ "read into context — only the user-provided comment is passed to this tool. "
-			+ "Use forwardEmail for a verbatim forward without any comment. "
+			+ "Use forwardEmail for a verbatim forward without any comment. " + SENT_COPY_DESCRIPTION
 			+ "DISABLED BY DEFAULT — opt in by setting EMAIL_ALLOW_SENDING=true "
 			+ "(or -Demail.allow-sending=true). When disabled, this tool returns an error and no message is sent. "
 			+ "Call listAccounts first to discover available accounts. "
@@ -1040,8 +1080,8 @@ public class EmailTools {
 			throw new ToolCallException(sendingDisabledMessage("forwardEmailWithComment"));
 		}
 		try {
-			emailService.forwardEmail(account, folder, uid, to, comment);
-			return "Forwarded UID " + uid + " from " + folder + " to " + to + " (with comment)";
+			var copy = emailService.forwardEmail(account, folder, uid, to, comment);
+			return "Forwarded UID " + uid + " from " + folder + " to " + to + " (with comment). " + copy.describe();
 		} catch (Exception e) {
 			throw failure("Error forwarding", e);
 		}

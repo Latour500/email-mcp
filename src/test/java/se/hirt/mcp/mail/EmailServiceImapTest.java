@@ -32,6 +32,7 @@ import com.icegreen.greenmail.configuration.GreenMailConfiguration;
 import com.icegreen.greenmail.junit5.GreenMailExtension;
 import com.icegreen.greenmail.util.GreenMailUtil;
 import com.icegreen.greenmail.util.ServerSetupTest;
+import io.quarkiverse.mcp.server.ToolCallException;
 import jakarta.activation.DataHandler;
 import jakarta.mail.Flags;
 import jakarta.mail.Folder;
@@ -50,6 +51,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.io.ByteArrayOutputStream;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -443,6 +445,165 @@ class EmailServiceImapTest {
 		assertFalse(subjectsIn("INBOX").contains("Must not be sent"));
 	}
 
+	// ── Copy of sent messages in the Sent folder ────────────────────────
+	// GreenMail sets no special-use flags, so the Sent folder is configured or found by name.
+
+	@Test
+	void sendSavesACopyToTheConfiguredSentFolder() throws Exception {
+		service.createFolder(ACCOUNT, "Sent");
+		service.createFolder(ACCOUNT, "Outgoing");
+		service.config = configWithSent(Optional.of("Outgoing"), true);
+
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Kept", "hello");
+
+		assertTrue(copy.saved(), copy.describe());
+		assertEquals("Outgoing", copy.folder(), "the configured folder wins over the detected one");
+		assertEquals(List.of("Kept"), subjectsIn("Outgoing"));
+		assertEquals(List.of(), subjectsIn("Sent"));
+		var stored = messageIn("Outgoing", "Kept");
+		assertTrue(stored.seen(), "the copy is marked as read");
+		assertEquals(messageIn("INBOX", "Kept").messageId(), stored.messageId(),
+				"the copy is the message that was sent, with the same Message-ID");
+	}
+
+	@Test
+	void sentFolderIsFoundUnderANamespacePrefix() throws Exception {
+		// The OVH-style layout: everything nested under INBOX.INBOX, so only the leaf name matches.
+		service.createFolder(ACCOUNT, "INBOX.INBOX");
+		service.createFolder(ACCOUNT, "INBOX.INBOX.Sent");
+
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Nested", "hello");
+
+		assertEquals("INBOX.INBOX.Sent", copy.folder(), copy.describe());
+		assertTrue(copy.saved(), copy.describe());
+		assertEquals(List.of("Nested"), subjectsIn("INBOX.INBOX.Sent"));
+	}
+
+	@Test
+	void sentFolderWithAccentsIsFoundByItsLeafName() throws Exception {
+		service.createFolder(ACCOUNT, "INBOX.Éléments envoyés");
+
+		assertEquals("INBOX.Éléments envoyés", service.getSentFolder(ACCOUNT));
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Accents", "hello");
+
+		assertTrue(copy.saved(), copy.describe());
+		assertEquals(List.of("Accents"), subjectsIn("INBOX.Éléments envoyés"));
+	}
+
+	@Test
+	void noSentFolderIsReportedButTheSendStillSucceeds() throws Exception {
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Nowhere to file", "hello");
+
+		assertTrue(subjectsIn("INBOX").contains("Nowhere to file"), "the message is sent all the same");
+		assertFalse(copy.saved());
+		assertTrue(copy.describe().startsWith("Copy NOT saved: no Sent folder found. Set the Sent folder"),
+				copy.describe());
+	}
+
+	@Test
+	void missingConfiguredSentFolderIsReportedButTheSendStillSucceeds() throws Exception {
+		service.config = configWithSent(Optional.of("Missing"), true);
+
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Configured wrong", "hello");
+
+		assertTrue(subjectsIn("INBOX").contains("Configured wrong"), "the message is sent all the same");
+		assertFalse(copy.saved());
+		assertTrue(copy.describe().contains("'Missing' does not exist"), copy.describe());
+	}
+
+	@Test
+	void failedAppendIsReportedButTheSendStillSucceeds() throws Exception {
+		// A session override naming a folder that is not there: resolution succeeds, the append fails.
+		service.setSentFolder(ACCOUNT, "Gone");
+
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Append fails", "hello");
+
+		assertTrue(subjectsIn("INBOX").contains("Append fails"), "the message is sent all the same");
+		assertFalse(copy.saved());
+		assertTrue(copy.describe().startsWith("Copy NOT saved to Gone: "), copy.describe());
+	}
+
+	@Test
+	void turnedOffCopySavesNothing() throws Exception {
+		service.createFolder(ACCOUNT, "Sent");
+		service.config = configWithSent(Optional.empty(), false);
+
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Not kept", "hello");
+
+		assertTrue(subjectsIn("INBOX").contains("Not kept"));
+		assertFalse(copy.saved());
+		assertTrue(copy.describe().contains("turned off"), copy.describe());
+		assertEquals(List.of(), subjectsIn("Sent"));
+	}
+
+	@Test
+	void disabledSendingSendsAndSavesNothing() throws Exception {
+		service.createFolder(ACCOUNT, "Sent");
+		var tools = new EmailTools();
+		tools.emailService = service;
+		tools.allowSending = false;
+
+		assertThrows(ToolCallException.class, () -> tools.sendEmail(ACCOUNT, USER, "", "", "Blocked", "hello"));
+
+		assertFalse(subjectsIn("INBOX").contains("Blocked"));
+		assertEquals(List.of(), subjectsIn("Sent"));
+	}
+
+	@Test
+	void sendEmailToolNamesTheFolderTheCopyWasSavedTo() throws Exception {
+		service.createFolder(ACCOUNT, "Sent");
+		var tools = new EmailTools();
+		tools.emailService = service;
+		tools.allowSending = true;
+
+		var result = tools.sendEmail(ACCOUNT, USER, "", "", "Tool send", "hello");
+
+		assertEquals("Email sent to " + USER + ". Copy saved to Sent.", result);
+		assertEquals(List.of("Tool send"), subjectsIn("Sent"));
+	}
+
+	@Test
+	void replyAndForwardAreSavedToo() throws Exception {
+		service.createFolder(ACCOUNT, "Sent");
+
+		var reply = service.replyEmail(ACCOUNT, "INBOX", uidOf("A"), "reply body", false, null, null);
+		var forward = service.forwardEmail(ACCOUNT, "INBOX", uidOf("B"), USER, "see below");
+
+		assertTrue(reply.saved(), reply.describe());
+		assertTrue(forward.saved(), forward.describe());
+		assertEquals(List.of("Fwd: B", "Re: A"), subjectsIn("Sent"));
+		assertTrue(messageIn("Sent", "Fwd: B").source().contains("body B"),
+				"the copy of the forward carries the original, read while its folder was still open");
+	}
+
+	@Test
+	void replyToAMessageInTheSentFolderItself() throws Exception {
+		// The original's folder stays open read-only while the copy of the reply is appended to it.
+		service.createFolder(ACCOUNT, "Sent");
+		service.sendEmail(ACCOUNT, "someone@example.com", null, null, "Follow-up", "first");
+
+		var copy = service.replyEmail(ACCOUNT, "Sent", uidOf("Sent", "Follow-up"), "second", false, null, null);
+
+		assertTrue(copy.saved(), copy.describe());
+		assertEquals(List.of("Follow-up", "Re: Follow-up"), subjectsIn("Sent"));
+	}
+
+	@Test
+	void copyKeepsTheBccThatRecipientsDoNotSee() throws Exception {
+		var hidden = "hidden@localhost";
+		greenMail.setUser(hidden, hidden, PASSWORD);
+		service.createFolder(ACCOUNT, "Sent");
+
+		service.sendEmail(ACCOUNT, USER, null, hidden, "Blind copy", "hello");
+
+		var copy = messageIn("Sent", "Blind copy");
+		assertNotNull(copy.bcc(), "the copy in Sent keeps the Bcc header, as mail clients do");
+		assertEquals(hidden, copy.bcc()[0]);
+		assertNull(messageIn("INBOX", "Blind copy").bcc(), "the main recipient must not see the Bcc header");
+		assertNull(messageIn(hidden, PASSWORD, "INBOX", "Blind copy").bcc(),
+				"the Bcc recipient receives the message, without the header either");
+	}
+
 	// ── helpers ─────────────────────────────────────────────────────────
 
 	private static EmailConfig config() {
@@ -459,9 +620,20 @@ class EmailServiceImapTest {
 				Optional.of(from));
 	}
 
+	private static EmailConfig configWithSent(Optional<String> sentFolder, boolean saveToSent) {
+		return config(ServerSetupTest.IMAP.getPort(), ServerSetupTest.SMTP.getPort(), false, false, 60,
+				Optional.empty(), sentFolder, saveToSent);
+	}
+
 	private static EmailConfig config(
 		int imapPort, int smtpPort, boolean smtpStarttls, boolean smtpSsl, int networkTimeoutSeconds,
 		Optional<String> from) {
+		return config(imapPort, smtpPort, smtpStarttls, smtpSsl, networkTimeoutSeconds, from, Optional.empty(), true);
+	}
+
+	private static EmailConfig config(
+		int imapPort, int smtpPort, boolean smtpStarttls, boolean smtpSsl, int networkTimeoutSeconds,
+		Optional<String> from, Optional<String> sentFolder, boolean saveToSent) {
 		var imap = new EmailConfig.ImapConfig() {
 			public String host() {
 				return "localhost";
@@ -529,6 +701,14 @@ class EmailServiceImapTest {
 				return Optional.empty();
 			}
 
+			public Optional<String> sentFolder() {
+				return sentFolder;
+			}
+
+			public boolean saveToSent() {
+				return saveToSent;
+			}
+
 			public Optional<String> from() {
 				return from;
 			}
@@ -555,11 +735,45 @@ class EmailServiceImapTest {
 
 	/** A second, independent IMAP session standing in for the user's regular mail client. */
 	private static Store otherClient() throws Exception {
+		return otherClient(USER, PASSWORD);
+	}
+
+	private static Store otherClient(String user, String password) throws Exception {
 		var props = new Properties();
 		props.put("mail.store.protocol", "imap");
 		var store = Session.getInstance(props).getStore("imap");
-		store.connect("localhost", ServerSetupTest.IMAP.getPort(), USER, PASSWORD);
+		store.connect("localhost", ServerSetupTest.IMAP.getPort(), user, password);
 		return store;
+	}
+
+	/** A message as another client sees it on the server, with its full source. */
+	private record StoredMessage(String subject, boolean seen, String messageId, String[] bcc, String source) {
+	}
+
+	private static StoredMessage messageIn(String folderName, String subject) throws Exception {
+		return messageIn(USER, PASSWORD, folderName, subject);
+	}
+
+	private static StoredMessage messageIn(String user, String password, String folderName, String subject)
+			throws Exception {
+		try (var store = otherClient(user, password)) {
+			var folder = store.getFolder(folderName);
+			folder.open(Folder.READ_ONLY);
+			try {
+				for (var m : folder.getMessages()) {
+					if (subject.equals(m.getSubject())) {
+						var source = new ByteArrayOutputStream();
+						m.writeTo(source);
+						return new StoredMessage(m.getSubject(), m.isSet(Flags.Flag.SEEN),
+								((MimeMessage) m).getMessageID(), m.getHeader("Bcc"),
+								source.toString(StandardCharsets.UTF_8));
+					}
+				}
+				throw new AssertionError("No message with subject " + subject + " in " + folderName);
+			} finally {
+				folder.close(false);
+			}
+		}
 	}
 
 	private static void flagDeletedFromAnotherClient(String subject) throws Exception {
@@ -579,12 +793,16 @@ class EmailServiceImapTest {
 	}
 
 	private long uidOf(String subject) throws Exception {
-		for (var h : service.listEmails(ACCOUNT, "INBOX", 0, 100, "date")) {
+		return uidOf("INBOX", subject);
+	}
+
+	private long uidOf(String folderName, String subject) throws Exception {
+		for (var h : service.listEmails(ACCOUNT, folderName, 0, 100, "date")) {
 			if (subject.equals(h.subject())) {
 				return h.uid();
 			}
 		}
-		throw new AssertionError("No message with subject " + subject + " in INBOX");
+		throw new AssertionError("No message with subject " + subject + " in " + folderName);
 	}
 
 	private static List<String> subjectsIn(String folderName) throws Exception {
