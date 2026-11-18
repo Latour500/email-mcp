@@ -1,0 +1,109 @@
+name: Windows bundle
+
+# Builds the Windows MCP Bundle (.mcpb) of this fork on demand and keeps it as an artifact of the run.
+# Same recipe as the Windows part of release.yml (GraalVM native image, sanity test of the binary,
+# mcpb/pack.sh), without signing and without publishing anything. The version is an input: no v* tag is
+# pushed, since a tag would start release.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version of the bundle, e.g. 1.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows-bundle:
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      # mcpb/pack.sh runs "npx -y @anthropic-ai/mcpb" from the current directory, and npx takes a copy
+      # installed there before the latest one from the registry. The whole tree is locked in .github/mcpb
+      # and installed in a folder of its own, outside the clone, and pack.sh is run from that folder.
+      # Must match the version in .github/mcpb/package.json.
+      MCPB_VERSION: '2.1.2'
+    steps:
+      - name: Check version input
+        shell: bash
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must look like 1.1.0, got: $VERSION" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (v5)
+        with:
+          persist-credentials: false
+
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@f70bc8032f90a104502824a54bcb94b6f01715bc # v1.6.8 (v1)
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set version
+        shell: bash
+        run: mvn -B versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
+
+      - name: Build native image
+        run: mvn -B package -Dnative -DskipTests
+
+      - name: Sanity test native binary
+        shell: bash
+        run: |
+          mvn -B test-compile failsafe:integration-test failsafe:verify \
+            -Dnative.image.path="target/email-mcp-server-${VERSION}-runner.exe"
+
+      - name: Rename binary
+        shell: bash
+        run: mv "target/email-mcp-server-${VERSION}-runner.exe" "target/email-mcp-server-${VERSION}-windows-x86_64.exe"
+
+      - name: Pin mcpb
+        shell: bash
+        run: |
+          MCPB_DIR="$(cygpath -u "$RUNNER_TEMP")/mcpb"
+          mkdir -p "$MCPB_DIR"
+          cp .github/mcpb/package.json .github/mcpb/package-lock.json "$MCPB_DIR/"
+          cd "$MCPB_DIR"
+          npm ci --ignore-scripts
+          FOUND="$(npx --no-install @anthropic-ai/mcpb --version | tr -d '\r')"
+          echo "mcpb used by pack.sh: ${FOUND}"
+          if [ "$FOUND" != "$MCPB_VERSION" ]; then
+            echo "expected mcpb ${MCPB_VERSION}, found ${FOUND}" >&2
+            exit 1
+          fi
+          echo "MCPB_DIR=${MCPB_DIR}" >> "$GITHUB_ENV"
+          echo "MCPB_FOUND=${FOUND}" >> "$GITHUB_ENV"
+
+      - name: Package MCP bundle
+        shell: bash
+        run: |
+          WORKSPACE="$(pwd)"
+          cd "$MCPB_DIR"
+          bash "${WORKSPACE}/mcpb/pack.sh" "$VERSION" windows-x86_64 win32 \
+            "${WORKSPACE}/target/email-mcp-server-${VERSION}-windows-x86_64.exe" \
+            "${WORKSPACE}/target/email-mcp-sent-${VERSION}-windows-x86_64.mcpb"
+
+      - name: Write SHA-256 to the run summary
+        shell: bash
+        run: |
+          BUNDLE="email-mcp-sent-${VERSION}-windows-x86_64.mcpb"
+          HASH="$(sha256sum "target/${BUNDLE}" | cut -d ' ' -f 1)"
+          {
+            echo "### ${BUNDLE}"
+            echo ""
+            echo "- SHA-256: \`${HASH}\`"
+            echo "- mcpb: ${MCPB_FOUND}"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0 (v5)
+        with:
+          name: email-mcp-sent-${{ inputs.version }}-windows-x86_64
+          path: target/email-mcp-sent-${{ inputs.version }}-windows-x86_64.mcpb
+          if-no-files-found: error

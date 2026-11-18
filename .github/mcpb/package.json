@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Pins the mcpb CLI that .github/workflows/windows-bundle.yml packs the bundle with.",
+  "dependencies": {
+    "@anthropic-ai/mcpb": "2.1.2"
+  }
+}
