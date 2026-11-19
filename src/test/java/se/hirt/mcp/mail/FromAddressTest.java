@@ -147,6 +147,18 @@ class FromAddressTest {
 			public boolean saveToSent() {
 				return true;
 			}
+
+			public Optional<String> minSendDelay() {
+				return Optional.empty();
+			}
+
+			public Optional<String> maxSendDelay() {
+				return Optional.empty();
+			}
+
+			public Optional<String> maxSendsPerDay() {
+				return Optional.empty();
+			}
 		};
 	}
 }

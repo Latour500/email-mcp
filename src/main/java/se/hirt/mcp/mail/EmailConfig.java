@@ -98,6 +98,43 @@ public interface EmailConfig {
 		 */
 		@WithDefault("true")
 		boolean saveToSent();
+
+		/*
+		 * The three pacing settings below are read as text and checked only when a message is about
+		 * to be sent (see PacingLimits): unset, blank or an unexpanded ${...} placeholder means 0,
+		 * a whole number is taken as is, and anything else makes the send tools refuse to send.
+		 * Read as numbers, an empty or decimal value would stop the whole server from starting.
+		 */
+
+		/**
+		 * Shortest pause, in seconds, between two messages sent by this account, for example
+		 * {@code 120}. After each send, the pause before the next one is drawn at random between
+		 * this and {@link #maxSendDelay()}. The previous send is also looked up in the Sent folder,
+		 * so the pause holds after a restart. When more than 45 seconds of it are left, the send
+		 * tools send nothing and say when the next message may leave. {@code 0} for both settings,
+		 * the default, turns the pause off: messages leave at once, with no lock and no lookup in
+		 * the Sent folder. {@code EMAIL_ACCOUNTS_<NAME>_MIN_SEND_DELAY} in the environment.
+		 */
+		Optional<String> minSendDelay();
+
+		/**
+		 * Longest pause, in seconds, between two messages sent by this account, for example
+		 * {@code 600}. Once it is set, {@link #minSendDelay()} must be at least 1 second and at
+		 * most this value, and no setting may be negative: otherwise the send tools refuse to send
+		 * until the settings are fixed. {@code EMAIL_ACCOUNTS_<NAME>_MAX_SEND_DELAY} in the
+		 * environment.
+		 */
+		Optional<String> maxSendDelay();
+
+		/**
+		 * Most messages this account may send in a day, from midnight to midnight in the computer's
+		 * time zone, for example {@code 80}. The count is the larger of the messages filed in the
+		 * Sent folder since midnight, which includes those sent from another mail client, and of
+		 * those sent by this server since midnight. If the Sent folder cannot be read, nothing is
+		 * sent. {@code 0}, the default, means no limit and no lookup in the Sent folder.
+		 * {@code EMAIL_ACCOUNTS_<NAME>_MAX_SENDS_PER_DAY} in the environment.
+		 */
+		Optional<String> maxSendsPerDay();
 	}
 
 	interface ImapConfig {

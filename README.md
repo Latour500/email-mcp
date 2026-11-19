@@ -66,6 +66,8 @@ For more information, see my [blog](https://hirt.se/blog/?p=1596).
 | `replyEmail` | Reply with proper threading headers and optional CC/BCC, then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
 | `forwardEmail` | Verbatim forward (body never enters LLM context), then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
 | `forwardEmailWithComment` | Forward with a comment prepended, then save a copy to the Sent folder. **Disabled by default** — opt in via `EMAIL_ALLOW_SENDING=true` |
+| `getSendLimits` | Show how an account paces its sends: pause, daily limit, messages sent today, next slot, last message sent. Read only (see [Pacing outgoing messages](#pacing-outgoing-messages)) |
+| `waitForSendSlot` | Wait, at most 45 seconds, until the next message of a paced account may leave. Never sends |
 
 All tools (except `listAccounts`) require an `account` parameter — the name of the account to operate on (e.g., `work`, `gmail`).
 
@@ -138,6 +140,9 @@ Accounts are defined by convention: `EMAIL_ACCOUNTS_<NAME>_IMAP_*` and `EMAIL_AC
 | `EMAIL_ACCOUNTS_<NAME>_TRASH_FOLDER` | no | auto-detected | `INBOX.INBOX.Trash` |
 | `EMAIL_ACCOUNTS_<NAME>_SENT_FOLDER` | no | auto-detected | `INBOX.INBOX.Sent` |
 | `EMAIL_ACCOUNTS_<NAME>_SAVE_TO_SENT` | no | `true` | `false` for Gmail |
+| `EMAIL_ACCOUNTS_<NAME>_MIN_SEND_DELAY` | no | `0` (off) | `120` |
+| `EMAIL_ACCOUNTS_<NAME>_MAX_SEND_DELAY` | no | `0` (off) | `600` |
+| `EMAIL_ACCOUNTS_<NAME>_MAX_SENDS_PER_DAY` | no | `0` (no limit) | `80` |
 
 For Gmail, create an [App Password](https://myaccount.google.com/apppasswords).
 
@@ -226,11 +231,64 @@ When sending is enabled, every message sent by `sendEmail`, `replyEmail`, `forwa
 `forwardEmailWithComment` is then saved to the account's Sent folder (see [Special folders](#special-folders)),
 marked as read, as a mail client does. The copy is the message that was sent, with the same Message-ID, and it
 keeps the Bcc header, which the recipients do not see. A copy that cannot be saved does not fail the send,
-since the message is already gone: the tool result says where the copy was saved, or why it was not.
+since the message is already gone: the tool result says where the copy was saved, or why it was not. The
+result also gives the Message-ID of the message sent.
 
 The copy is on by default. Gmail already files the messages sent through its servers in its Sent folder, so
 turn the copy off for a Gmail account with `EMAIL_ACCOUNTS_<NAME>_SAVE_TO_SENT=false`, or *Save copy to Sent*
 in the Claude Desktop extension settings.
+
+### Pacing outgoing messages
+
+An account that sends a series of messages, one after another, can space them out as a person would and stay
+under a daily limit, so that its provider does not take it for a bulk sender. Both settings are per account
+and off by default: an account with neither sends at once, as before, with no lock, no lookup in the Sent
+folder and no wait.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `EMAIL_ACCOUNTS_<NAME>_MIN_SEND_DELAY` | `0` | Shortest pause between two messages, in seconds, for example `120`. |
+| `EMAIL_ACCOUNTS_<NAME>_MAX_SEND_DELAY` | `0` | Longest pause, for example `600`. The pause before each message is drawn at random between the two. |
+| `EMAIL_ACCOUNTS_<NAME>_MAX_SENDS_PER_DAY` | `0` | Most messages a day, from midnight in the computer's time zone, for example `80`. `0` means no limit. |
+
+In Claude Desktop these are the *Min pause between sends*, *Max pause between sends* and *Max sends per day*
+fields of the extension settings. Each value is a whole number, and an empty one means 0. Once a maximum pause
+is set, the minimum must be at least 1 and at most the maximum, and no value may be negative. A value that breaks
+these rules does not stop the server: the send tools refuse to send and name the setting to fix.
+
+How it works:
+
+- The messages of a paced account leave one at a time. The pause is drawn once, after each send, so retrying
+  does not draw it again.
+- Before each send, the Sent folder is read over a connection of its own. The messages filed there since
+  midnight count toward the limit, including those sent from another mail client, and the latest one starts
+  the pause, so both hold after a restart. The count is the larger of that and of the messages this server sent
+  today, in case a copy is missing. If the Sent folder cannot be read, nothing is sent.
+- A send that reached the SMTP server and then failed, for instance on a timeout waiting for the server's
+  answer, may have left all the same: the pause starts anyway, but the message does not count toward the limit.
+- Just before the message leaves, the send checks that the client has not cancelled the call.
+
+**Why the wait is limited to 45 seconds.** An MCP client gives up on a tool call after a while. Measured in
+November 2026 with a long-running test tool, Claude Desktop ended the call after about 80 seconds, told the
+server only much later, and did not ask for progress notifications that might have extended it. So a send
+waits at most 45 seconds for the pause to end, counted from the start of the call; when more is left, or once
+the daily limit is reached, nothing is sent and the error says when the next message may leave. The network
+timeouts of a paced send are also shorter, 10 seconds per operation for IMAP and 15 for SMTP, so that the call
+ends well within that limit.
+
+Two tools go with it:
+
+- `getSendLimits` shows the settings, how many messages the account has sent today, when the next one may
+  leave, and the last one sent with its Message-ID. It is read only, and reads nothing for an account that is
+  not paced.
+- `waitForSendSlot` waits until the next message may leave, at most 45 seconds, then says how long remains.
+  It never sends. When minutes remain, the model can prepare the next message meanwhile and send once the time
+  has come: a send started less than 45 seconds before that time waits for it by itself.
+
+**Never send again after an uncertain failure.** A send that ends with an error and no result (the client
+gave up on the call) or with an error saying that the message may have left may well have gone. The send tools
+tell the model never to send it again in that case, but to check the Sent folder first (`getSendLimits` names
+the last message sent) and tell the user.
 
 ## Setting up with Claude Desktop
 
@@ -252,7 +310,9 @@ The easiest way is the MCP Bundle. There is no config file to edit:
    *Drafts*, *Spam*, *Trash* and *Sent folder* fields only for providers where auto-detection picks the wrong
    folder (see [Special folders](#special-folders)). Leave the two switches, *Allow sending* and
    *Allow permanent deletion*, off unless you need them. *Save copy to Sent* is on by default and only matters
-   once sending is allowed: turn it off for Gmail (see [Copy of sent messages](#copy-of-sent-messages)). Save.
+   once sending is allowed: turn it off for Gmail (see [Copy of sent messages](#copy-of-sent-messages)). The
+   three pacing fields stay at 0 unless the account sends series of messages (see
+   [Pacing outgoing messages](#pacing-outgoing-messages)). Save.
 
 4. Make sure the extension is enabled and start a new chat. The email tools appear in the tool list; the
    account is called `default` in the tools.

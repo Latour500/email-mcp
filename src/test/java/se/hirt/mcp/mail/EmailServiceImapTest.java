@@ -389,7 +389,7 @@ class EmailServiceImapTest {
 
 	@Test
 	void sendEmailOverPlainSmtpDeliversToInbox() throws Exception {
-		service.sendEmail(ACCOUNT, USER, null, null, "Sent via SMTP", "hello");
+		service.sendEmail(ACCOUNT, USER, null, null, "Sent via SMTP", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(greenMail.waitForIncomingEmail(5_000, 1), "GreenMail should have received the message");
 		assertTrue(subjectsIn("INBOX").contains("Sent via SMTP"));
@@ -399,7 +399,7 @@ class EmailServiceImapTest {
 	void configuredFromAddressWithDisplayNameIsUsed() throws Exception {
 		service.config = configWithFrom("Test Sender <sender@localhost>");
 
-		service.sendEmail(ACCOUNT, USER, null, null, "From check", "hello");
+		service.sendEmail(ACCOUNT, USER, null, null, "From check", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(greenMail.waitForIncomingEmail(5_000, 1));
 		var received = findReceived("From check");
@@ -413,7 +413,7 @@ class EmailServiceImapTest {
 	void sentMessageIdUsesTheSenderDomain() throws Exception {
 		service.config = configWithFrom("Me <me@example.com>");
 
-		service.sendEmail(ACCOUNT, USER, null, null, "Message-ID check", "hello");
+		service.sendEmail(ACCOUNT, USER, null, null, "Message-ID check", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(greenMail.waitForIncomingEmail(5_000, 1));
 		var messageId = findReceived("Message-ID check").getMessageID();
@@ -444,7 +444,8 @@ class EmailServiceImapTest {
 		original.saveChanges();
 		greenMail.setUser(USER, USER, PASSWORD).deliver(original);
 
-		service.replyEmail(ACCOUNT, "INBOX", uidOf("Group thread"), "reply body", true, null, null);
+		service.replyEmail(ACCOUNT, "INBOX", uidOf("Group thread"), "reply body", true, null, null,
+				EmailService.NOT_CANCELLED);
 
 		assertTrue(greenMail.waitForIncomingEmail(5_000, 1));
 		var reply = findReceived("Re: Group thread");
@@ -463,8 +464,8 @@ class EmailServiceImapTest {
 		var strictService = new EmailService();
 		strictService.config = config(ServerSetupTest.IMAP.getPort(), ServerSetupTest.SMTP.getPort(), true, false, 60);
 
-		var e = assertThrows(MessagingException.class,
-				() -> strictService.sendEmail(ACCOUNT, USER, null, null, "Must not be sent", "hello"));
+		var e = assertThrows(MessagingException.class, () -> strictService.sendEmail(ACCOUNT, USER, null, null,
+				"Must not be sent", "hello", EmailService.NOT_CANCELLED));
 
 		assertTrue(e.getMessage().toLowerCase().contains("starttls"), "unexpected failure reason: " + e.getMessage());
 		assertFalse(subjectsIn("INBOX").contains("Must not be sent"));
@@ -479,7 +480,7 @@ class EmailServiceImapTest {
 		service.createFolder(ACCOUNT, "Outgoing");
 		service.config = configWithSent(Optional.of("Outgoing"), true);
 
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Kept", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Kept", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(copy.saved(), copy.describe());
 		assertEquals("Outgoing", copy.folder(), "the configured folder wins over the detected one");
@@ -497,7 +498,7 @@ class EmailServiceImapTest {
 		service.createFolder(ACCOUNT, "INBOX.INBOX");
 		service.createFolder(ACCOUNT, "INBOX.INBOX.Sent");
 
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Nested", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Nested", "hello", EmailService.NOT_CANCELLED);
 
 		assertEquals("INBOX.INBOX.Sent", copy.folder(), copy.describe());
 		assertTrue(copy.saved(), copy.describe());
@@ -509,7 +510,7 @@ class EmailServiceImapTest {
 		service.createFolder(ACCOUNT, "INBOX.Éléments envoyés");
 
 		assertEquals("INBOX.Éléments envoyés", service.getSentFolder(ACCOUNT));
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Accents", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Accents", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(copy.saved(), copy.describe());
 		assertEquals(List.of("Accents"), subjectsIn("INBOX.Éléments envoyés"));
@@ -517,7 +518,7 @@ class EmailServiceImapTest {
 
 	@Test
 	void noSentFolderIsReportedButTheSendStillSucceeds() throws Exception {
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Nowhere to file", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Nowhere to file", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(subjectsIn("INBOX").contains("Nowhere to file"), "the message is sent all the same");
 		assertFalse(copy.saved());
@@ -529,7 +530,8 @@ class EmailServiceImapTest {
 	void missingConfiguredSentFolderIsReportedButTheSendStillSucceeds() throws Exception {
 		service.config = configWithSent(Optional.of("Missing"), true);
 
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Configured wrong", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Configured wrong", "hello",
+				EmailService.NOT_CANCELLED);
 
 		assertTrue(subjectsIn("INBOX").contains("Configured wrong"), "the message is sent all the same");
 		assertFalse(copy.saved());
@@ -541,7 +543,7 @@ class EmailServiceImapTest {
 		// A session override naming a folder that is not there: resolution succeeds, the append fails.
 		service.setSentFolder(ACCOUNT, "Gone");
 
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Append fails", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Append fails", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(subjectsIn("INBOX").contains("Append fails"), "the message is sent all the same");
 		assertFalse(copy.saved());
@@ -553,7 +555,7 @@ class EmailServiceImapTest {
 		service.createFolder(ACCOUNT, "Sent");
 		service.config = configWithSent(Optional.empty(), false);
 
-		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Not kept", "hello");
+		var copy = service.sendEmail(ACCOUNT, USER, null, null, "Not kept", "hello", EmailService.NOT_CANCELLED);
 
 		assertTrue(subjectsIn("INBOX").contains("Not kept"));
 		assertFalse(copy.saved());
@@ -568,7 +570,7 @@ class EmailServiceImapTest {
 		tools.emailService = service;
 		tools.allowSending = false;
 
-		assertThrows(ToolCallException.class, () -> tools.sendEmail(ACCOUNT, USER, "", "", "Blocked", "hello"));
+		assertThrows(ToolCallException.class, () -> tools.sendEmail(ACCOUNT, USER, "", "", "Blocked", "hello", null));
 
 		assertFalse(subjectsIn("INBOX").contains("Blocked"));
 		assertEquals(List.of(), subjectsIn("Sent"));
@@ -581,9 +583,10 @@ class EmailServiceImapTest {
 		tools.emailService = service;
 		tools.allowSending = true;
 
-		var result = tools.sendEmail(ACCOUNT, USER, "", "", "Tool send", "hello");
+		var result = tools.sendEmail(ACCOUNT, USER, "", "", "Tool send", "hello", null);
 
-		assertEquals("Email sent to " + USER + ". Copy saved to Sent.", result);
+		assertEquals("Email sent to " + USER + ". Message-ID: " + messageIn("Sent", "Tool send").messageId()
+				+ ". Copy saved to Sent.", result);
 		assertEquals(List.of("Tool send"), subjectsIn("Sent"));
 	}
 
@@ -591,8 +594,9 @@ class EmailServiceImapTest {
 	void replyAndForwardAreSavedToo() throws Exception {
 		service.createFolder(ACCOUNT, "Sent");
 
-		var reply = service.replyEmail(ACCOUNT, "INBOX", uidOf("A"), "reply body", false, null, null);
-		var forward = service.forwardEmail(ACCOUNT, "INBOX", uidOf("B"), USER, "see below");
+		var reply = service.replyEmail(ACCOUNT, "INBOX", uidOf("A"), "reply body", false, null, null,
+				EmailService.NOT_CANCELLED);
+		var forward = service.forwardEmail(ACCOUNT, "INBOX", uidOf("B"), USER, "see below", EmailService.NOT_CANCELLED);
 
 		assertTrue(reply.saved(), reply.describe());
 		assertTrue(forward.saved(), forward.describe());
@@ -605,9 +609,10 @@ class EmailServiceImapTest {
 	void replyToAMessageInTheSentFolderItself() throws Exception {
 		// The original's folder stays open read-only while the copy of the reply is appended to it.
 		service.createFolder(ACCOUNT, "Sent");
-		service.sendEmail(ACCOUNT, "someone@example.com", null, null, "Follow-up", "first");
+		service.sendEmail(ACCOUNT, "someone@example.com", null, null, "Follow-up", "first", EmailService.NOT_CANCELLED);
 
-		var copy = service.replyEmail(ACCOUNT, "Sent", uidOf("Sent", "Follow-up"), "second", false, null, null);
+		var copy = service.replyEmail(ACCOUNT, "Sent", uidOf("Sent", "Follow-up"), "second", false, null, null,
+				EmailService.NOT_CANCELLED);
 
 		assertTrue(copy.saved(), copy.describe());
 		assertEquals(List.of("Follow-up", "Re: Follow-up"), subjectsIn("Sent"));
@@ -619,7 +624,7 @@ class EmailServiceImapTest {
 		greenMail.setUser(hidden, hidden, PASSWORD);
 		service.createFolder(ACCOUNT, "Sent");
 
-		service.sendEmail(ACCOUNT, USER, null, hidden, "Blind copy", "hello");
+		service.sendEmail(ACCOUNT, USER, null, hidden, "Blind copy", "hello", EmailService.NOT_CANCELLED);
 
 		var copy = messageIn("Sent", "Blind copy");
 		assertNotNull(copy.bcc(), "the copy in Sent keeps the Bcc header, as mail clients do");
@@ -732,6 +737,18 @@ class EmailServiceImapTest {
 
 			public boolean saveToSent() {
 				return saveToSent;
+			}
+
+			public Optional<String> minSendDelay() {
+				return Optional.empty();
+			}
+
+			public Optional<String> maxSendDelay() {
+				return Optional.empty();
+			}
+
+			public Optional<String> maxSendsPerDay() {
+				return Optional.empty();
 			}
 
 			public Optional<String> from() {

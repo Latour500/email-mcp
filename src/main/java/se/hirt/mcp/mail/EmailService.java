@@ -48,8 +48,11 @@ import org.eclipse.angus.mail.imap.IMAPStore;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 
 @ApplicationScoped
 public class EmailService {
@@ -110,7 +113,10 @@ public class EmailService {
 	 * milliseconds and defaults to no timeout at all.
 	 */
 	private void applyNetworkTimeout(Properties props, String protocol) {
-		int seconds = config.networkTimeout();
+		applyNetworkTimeout(props, protocol, config.networkTimeout());
+	}
+
+	private static void applyNetworkTimeout(Properties props, String protocol, int seconds) {
 		if (seconds <= 0) {
 			return;
 		}
@@ -193,6 +199,13 @@ public class EmailService {
 	}
 
 	private Store connectImapStore(String accountName) throws MessagingException {
+		var store = openImapStore(accountName, config.networkTimeout());
+		imapStores.put(accountName, store);
+		return store;
+	}
+
+	/** Opens a new IMAP connection for the account, with the given network timeout in seconds. */
+	private Store openImapStore(String accountName, int timeoutSeconds) throws MessagingException {
 		var ac = getAccountConfig(accountName);
 		var imapCfg = ac.imap();
 
@@ -209,12 +222,11 @@ public class EmailService {
 			// ssl=false is also how one talks to a local or test server that has no TLS at all.
 			props.put("mail." + protocol + ".starttls.enable", "true");
 		}
-		applyNetworkTimeout(props, protocol);
+		applyNetworkTimeout(props, protocol, timeoutSeconds);
 
 		var session = Session.getInstance(props);
 		var store = session.getStore(protocol);
 		store.connect(imapCfg.username(), imapCfg.password());
-		imapStores.put(accountName, store);
 		return store;
 	}
 
@@ -1057,19 +1069,37 @@ public class EmailService {
 
 	/**
 	 * What became of the copy of a sent message: saved to {@code folder}, not saved because of
-	 * {@code problem}, or not saved because the account turned the copy off.
+	 * {@code problem}, or not saved because the account turned the copy off. Also carries the
+	 * Message-ID of the message sent, and how long the send waited for the pause between messages.
 	 */
-	public record SentCopy(String folder, String problem) {
+	public record SentCopy(String folder, String problem, String messageId, Duration waited) {
 		static SentCopy savedTo(String folder) {
-			return new SentCopy(folder, null);
+			return new SentCopy(folder, null, null, Duration.ZERO);
 		}
 
 		static SentCopy turnedOff() {
-			return new SentCopy(null, null);
+			return new SentCopy(null, null, null, Duration.ZERO);
 		}
 
 		static SentCopy failed(String folder, String problem) {
-			return new SentCopy(folder, problem);
+			return new SentCopy(folder, problem, null, Duration.ZERO);
+		}
+
+		/** The same copy, for the message sent with this Message-ID after waiting this long. */
+		SentCopy of(String messageId, Duration waited) {
+			return new SentCopy(folder, problem, messageId, waited);
+		}
+
+		/** What the send tools report: the Message-ID, the pause waited if any, then the copy. */
+		public String report() {
+			var text = new StringBuilder();
+			if (messageId != null) {
+				text.append("Message-ID: ").append(messageId).append(". ");
+			}
+			if (waited.isPositive()) {
+				text.append("Waited ").append(PacingText.duration(waited)).append(" for the pause between messages. ");
+			}
+			return text.append(describe()).toString();
 		}
 
 		public boolean saved() {
@@ -1092,7 +1122,7 @@ public class EmailService {
 	 * read. A failure is returned, never thrown: the message is already sent, and the send must
 	 * still be reported as such.
 	 */
-	private SentCopy saveToSent(String account, Message message) {
+	private SentCopy saveToSent(String account, Message message, PacedImapConnection.MailSupplier<Store> store) {
 		String sentName = null;
 		try {
 			if (!getAccountConfig(account).saveToSent()) {
@@ -1104,7 +1134,7 @@ public class EmailService {
 						"no Sent folder found. Set the Sent folder (EMAIL_ACCOUNTS_<NAME>_SENT_FOLDER), or call "
 								+ "listFolderTree and setSentFolder to set it for this session.");
 			}
-			var sentFolder = getImapStore(account).getFolder(sentName);
+			var sentFolder = store.get().getFolder(sentName);
 			sentFolder.open(Folder.READ_WRITE);
 			try {
 				message.setFlag(Flags.Flag.SEEN, true);
@@ -1116,6 +1146,129 @@ public class EmailService {
 		} catch (Exception e) {
 			return SentCopy.failed(sentName, e.getMessage() != null ? e.getMessage() : e.getClass().getName());
 		}
+	}
+
+	// ── Send pacing ──────────────────────────────────────────────────────
+
+	/**
+	 * Network timeouts, in seconds, of a paced send: its own IMAP connection, and its SMTP session.
+	 * Short, so that a silent server cannot keep the call past what the client waits for;
+	 * {@link EmailConfig#networkTimeout()} still applies when it is shorter.
+	 */
+	static final int PACED_IMAP_TIMEOUT = 10;
+	static final int PACED_SMTP_TIMEOUT = 15;
+
+	static int pacedTimeout(int networkTimeout, int pacedTimeout) {
+		return networkTimeout > 0 ? Math.min(networkTimeout, pacedTimeout) : pacedTimeout;
+	}
+
+	/** Spaces and counts the sends of the accounts that ask for it. Replaced by the tests. */
+	SendPacing pacing = new SendPacing();
+
+	/** Never cancelled: for a caller that has no client to cancel it. */
+	public static final BooleanSupplier NOT_CANCELLED = () -> false;
+
+	/** The IMAP connection of one paced send, opened on first use. */
+	PacedImapConnection pacedImap(String account) {
+		return new PacedImapConnection(
+				() -> openImapStore(account, pacedTimeout(config.networkTimeout(), PACED_IMAP_TIMEOUT)),
+				() -> getSentFolder(account));
+	}
+
+	/**
+	 * Sends a message and saves its copy to the Sent folder. An account not paced sends at once,
+	 * exactly as before. A paced account first takes its turn, checks its daily limit and waits for
+	 * the end of its pause (see {@link SendPacing}); its copy is then saved over the connection of
+	 * the call. Either way, nothing leaves if the client has cancelled the call by then.
+	 *
+	 * @param start
+	 *            when the tool call began, on the pacing clock
+	 */
+	private SentCopy send(String account, MimeMessage message, Instant start, BooleanSupplier cancelled)
+			throws MessagingException {
+		var limits = PacingLimits.of(account, getAccountConfig(account));
+		if (!limits.on()) {
+			refuseIfCancelled(cancelled);
+			Transport.send(message);
+			return saveToSent(account, message, () -> getImapStore(account)).of(message.getMessageID(), Duration.ZERO);
+		}
+		try (var imap = pacedImap(account); var permit = pacing.acquire(account, limits, imap, start)) {
+			refuseIfCancelled(cancelled);
+			transmit(message, permit);
+			return saveToSent(account, message, imap::store).of(message.getMessageID(), permit.waited());
+		}
+	}
+
+	private static void refuseIfCancelled(BooleanSupplier cancelled) throws MessagingException {
+		if (cancelled.getAsBoolean()) {
+			throw new MessagingException("Nothing was sent: the client cancelled the call.");
+		}
+	}
+
+	/**
+	 * Hands the message of a paced account to the SMTP server, as {@link Transport#send} does. Once
+	 * the connection is open, the message may leave even if the send then fails (a timeout waiting
+	 * for the server's answer), so the pause before the next message starts all the same; only a
+	 * message the server accepted counts toward the daily limit.
+	 */
+	private static void transmit(MimeMessage message, SendPacing.Permit permit) throws MessagingException {
+		message.saveChanges();
+		var recipients = message.getAllRecipients();
+		if (recipients == null || recipients.length == 0) {
+			throw new SendFailedException("No recipient addresses");
+		}
+		var transport = message.getSession().getTransport("smtp");
+		transport.connect();
+		try {
+			transport.sendMessage(message, recipients);
+		} catch (MessagingException | RuntimeException e) {
+			permit.attempted();
+			throw new MessagingException(e.getMessage() + ". The SMTP server was reached, so the message may have "
+					+ "left all the same: do not send it again, tell the user, who can check with the recipient. The "
+					+ "pause before the next message has started.", e);
+		} finally {
+			try {
+				transport.close();
+			} catch (MessagingException e) {
+				// The server's answer to the message is already known; a failed goodbye changes nothing.
+			}
+		}
+		var to = message.getRecipients(Message.RecipientType.TO);
+		permit.sent(to != null ? InternetAddress.toUnicodeString(to) : null, message.getSubject(),
+				message.getMessageID());
+	}
+
+	/**
+	 * How the account paces its sends, for getSendLimits. Reads the Sent folder of a paced account,
+	 * nothing for an account that is not paced, and never sends.
+	 */
+	public String sendLimits(String account) throws MessagingException {
+		var start = pacing.now();
+		var limits = PacingLimits.of(account, getAccountConfig(account));
+		if (!limits.on()) {
+			return PacingText.notPaced(account);
+		}
+		try (var imap = pacedImap(account)) {
+			return pacing.describe(account, pacing.status(account, limits, imap, start));
+		}
+	}
+
+	/**
+	 * Waits until the next message of a paced account may leave, at most until 45 seconds after the
+	 * call began, for waitForSendSlot. Never sends. The connection that read the Sent folder is
+	 * closed before the wait.
+	 */
+	public String waitForSendSlot(String account) throws MessagingException {
+		var start = pacing.now();
+		var limits = PacingLimits.of(account, getAccountConfig(account));
+		if (!limits.on()) {
+			return PacingText.notPaced(account);
+		}
+		SendPacing.Status before;
+		try (var imap = pacedImap(account)) {
+			before = pacing.status(account, limits, imap, start);
+		}
+		return pacing.waitForSlot(account, before, start);
 	}
 
 	// ── Send email ───────────────────────────────────────────────────────
@@ -1138,7 +1291,9 @@ public class EmailService {
 			props.put("mail.smtp.starttls.enable", "true");
 			props.put("mail.smtp.starttls.required", "true");
 		}
-		applyNetworkTimeout(props, "smtp");
+		int timeout = config.networkTimeout();
+		applyNetworkTimeout(props, "smtp",
+				PacingLimits.of(account, ac).on() ? pacedTimeout(timeout, PACED_SMTP_TIMEOUT) : timeout);
 		var from = fromAddress(ac);
 		applyMessageIdDomain(props, from);
 
@@ -1154,8 +1309,10 @@ public class EmailService {
 		return message;
 	}
 
-	public SentCopy sendEmail(String account, String to, String cc, String bcc, String subject, String body)
+	public SentCopy sendEmail(
+		String account, String to, String cc, String bcc, String subject, String body, BooleanSupplier cancelled)
 			throws MessagingException {
+		var start = pacing.now();
 		var message = buildSmtpMessage(account);
 		message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to));
 		if (cc != null) {
@@ -1166,13 +1323,13 @@ public class EmailService {
 		}
 		message.setSubject(subject);
 		message.setText(body);
-		Transport.send(message);
-		return saveToSent(account, message);
+		return send(account, message, start, cancelled);
 	}
 
 	public SentCopy replyEmail(
-		String account, String folderName, long uid, String body, boolean replyAll, String extraCc, String extraBcc)
-			throws MessagingException {
+		String account, String folderName, long uid, String body, boolean replyAll, String extraCc, String extraBcc,
+		BooleanSupplier cancelled) throws MessagingException {
+		var start = pacing.now();
 		var ac = getAccountConfig(account);
 		var store = getImapStore(account);
 		var folder = store.getFolder(folderName);
@@ -1240,8 +1397,7 @@ public class EmailService {
 			}
 
 			reply.setText(body);
-			Transport.send(reply);
-			return saveToSent(account, reply);
+			return send(account, reply, start, cancelled);
 		} finally {
 			folder.close(false);
 		}
@@ -1249,8 +1405,10 @@ public class EmailService {
 
 	// ── Forward email ────────────────────────────────────────────────────
 
-	public SentCopy forwardEmail(String account, String folderName, long uid, String to, String comment)
+	public SentCopy forwardEmail(
+		String account, String folderName, long uid, String to, String comment, BooleanSupplier cancelled)
 			throws MessagingException {
+		var start = pacing.now();
 		var store = getImapStore(account);
 		var folder = store.getFolder(folderName);
 		folder.open(Folder.READ_ONLY);
@@ -1282,8 +1440,7 @@ public class EmailService {
 			multipart.addBodyPart(originalPart);
 
 			forward.setContent(multipart);
-			Transport.send(forward);
-			return saveToSent(account, forward);
+			return send(account, forward, start, cancelled);
 		} finally {
 			folder.close(false);
 		}

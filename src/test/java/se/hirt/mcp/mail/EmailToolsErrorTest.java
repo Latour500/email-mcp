@@ -85,7 +85,7 @@ class EmailToolsErrorTest {
 	@Test
 	void disabledToolsAreErrors() {
 		var send = assertThrows(ToolCallException.class,
-				() -> tools.sendEmail("a", "to@example.com", "", "", "Subject", "Body"));
+				() -> tools.sendEmail("a", "to@example.com", "", "", "Subject", "Body", null));
 		assertTrue(send.getMessage().contains("sendEmail is disabled"), send.getMessage());
 		var delete = assertThrows(ToolCallException.class, () -> tools.deleteEmail("a", "INBOX", 1));
 		assertTrue(delete.getMessage().contains("deleteEmail is disabled"), delete.getMessage());
