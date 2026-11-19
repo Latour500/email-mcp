@@ -406,6 +406,31 @@ class EmailServiceImapTest {
 		assertEquals("Test Sender <sender@localhost>", received.getFrom()[0].toString());
 	}
 
+	// ── Message-ID ──────────────────────────────────────────────────────
+	// Without mail.from, Jakarta Mail puts the computer's host name after the @ of the Message-ID.
+
+	@Test
+	void sentMessageIdUsesTheSenderDomain() throws Exception {
+		service.config = configWithFrom("Me <me@example.com>");
+
+		service.sendEmail(ACCOUNT, USER, null, null, "Message-ID check", "hello");
+
+		assertTrue(greenMail.waitForIncomingEmail(5_000, 1));
+		var messageId = findReceived("Message-ID check").getMessageID();
+		assertTrue(messageId.endsWith("@example.com>"), messageId);
+	}
+
+	@Test
+	void draftMessageIdUsesTheSenderDomain() throws Exception {
+		service.config = configWithFrom("Me <me@example.com>");
+		service.createFolder(ACCOUNT, "Drafts");
+
+		service.saveDraft(ACCOUNT, USER, null, null, "Draft ID check", "hello", null, 0);
+
+		var messageId = messageIn("Drafts", "Draft ID check").messageId();
+		assertTrue(messageId.endsWith("@example.com>"), messageId);
+	}
+
 	@Test
 	void replyAllLeavesOwnAddressesOutButKeepsTheOthers() throws Exception {
 		service.config = configWithFrom("Me <me@example.com>");

@@ -32,6 +32,7 @@ import jakarta.mail.MessagingException;
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -67,6 +68,18 @@ class FromAddressTest {
 	@Test
 	void nonAddressUsernameStillYieldsAFromRatherThanFailing() throws Exception {
 		assertEquals("login123", EmailService.fromAddress(account("login123", Optional.empty())).getAddress());
+	}
+
+	@Test
+	void messageIdDomainIsSetOnlyForAnEmailAddress() throws Exception {
+		var props = new Properties();
+		EmailService.applyMessageIdDomain(props,
+				EmailService.fromAddress(account("login123", Optional.of("Jane Doe <jane@example.com>"))));
+		assertEquals("jane@example.com", props.getProperty("mail.from"));
+
+		var none = new Properties();
+		EmailService.applyMessageIdDomain(none, EmailService.fromAddress(account("login123", Optional.empty())));
+		assertNull(none.getProperty("mail.from"), "a login that is not an address would give a Message-ID without @");
 	}
 
 	@Test

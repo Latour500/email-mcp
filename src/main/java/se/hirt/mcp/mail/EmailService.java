@@ -144,6 +144,18 @@ public class EmailService {
 	}
 
 	/**
+	 * Builds the Message-ID of new messages on the domain of the From address. Jakarta Mail takes
+	 * the part after the {@code @} from {@code mail.from}; without it, that part is the computer's
+	 * host name, which every recipient would then see.
+	 */
+	static void applyMessageIdDomain(Properties props, InternetAddress from) {
+		var address = from.getAddress();
+		if (address != null && address.indexOf('@') > 0) {
+			props.put("mail.from", address);
+		}
+	}
+
+	/**
 	 * The addresses that belong to this account, lower-cased: the From address, and the IMAP and
 	 * SMTP usernames when they are email addresses. Reply-all leaves these out of the Cc list.
 	 */
@@ -442,9 +454,12 @@ public class EmailService {
 		String account, String to, String cc, String bcc, String subject, String body, String inReplyToFolder,
 		long inReplyToUid) throws MessagingException {
 		var ac = getAccountConfig(account);
-		var session = Session.getInstance(new Properties());
+		var from = fromAddress(ac);
+		var props = new Properties();
+		applyMessageIdDomain(props, from);
+		var session = Session.getInstance(props);
 		var draft = new MimeMessage(session);
-		draft.setFrom(fromAddress(ac));
+		draft.setFrom(from);
 		draft.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to));
 		if (cc != null) {
 			draft.setRecipients(Message.RecipientType.CC, InternetAddress.parse(cc));
@@ -1124,6 +1139,8 @@ public class EmailService {
 			props.put("mail.smtp.starttls.required", "true");
 		}
 		applyNetworkTimeout(props, "smtp");
+		var from = fromAddress(ac);
+		applyMessageIdDomain(props, from);
 
 		var session = Session.getInstance(props, new Authenticator() {
 			@Override
@@ -1133,7 +1150,7 @@ public class EmailService {
 		});
 
 		var message = new MimeMessage(session);
-		message.setFrom(fromAddress(ac));
+		message.setFrom(from);
 		return message;
 	}
 
