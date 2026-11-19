@@ -34,6 +34,7 @@ import com.icegreen.greenmail.util.GreenMailUtil;
 import com.icegreen.greenmail.util.ServerSetupTest;
 import io.quarkiverse.mcp.server.Cancellation;
 import io.quarkiverse.mcp.server.ToolCallException;
+import jakarta.mail.Flags;
 import jakarta.mail.Folder;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
@@ -60,8 +61,10 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.TimeZone;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -215,6 +218,64 @@ class PacedSendTest {
 			assertEquals("someone@example.com", latest.to());
 			assertEquals(messageId("Sent", "Paced copy"), latest.messageId(),
 					"the pacing recognizes its own copy by the Message-ID of the message sent");
+		}
+	}
+
+	@Test
+	void messagesDeletedButNotYetExpungedDoNotCount() throws Exception {
+		// A mail client that deletes a message often only flags it \Deleted, and expunges later.
+		service.createFolder(ACCOUNT, "Sent");
+		fileAt("Sent", "Eight", at("2026-01-10T08:00:00"));
+		fileAt("Sent", "Nine", at("2026-01-10T09:00:00"));
+		fileAt("Sent", "Deleted later", at("2026-01-10T09:30:00"));
+		flagDeleted("Sent", "Deleted later");
+
+		try (var imap = service.pacedImap(ACCOUNT)) {
+			var summary = imap.read(at("2026-01-10T00:00:00"), at("2026-01-10T00:00:00"));
+
+			assertEquals(2, summary.sinceMidnight(), "the message flagged \\Deleted is not counted");
+			assertEquals("Nine", summary.latest().orElseThrow().subject(), "nor taken as the latest");
+		}
+	}
+
+	@Test
+	void theCopyIsNeverFiledWithADateWrittenInTheWrongZone() throws Exception {
+		// In the native image, the formatter that writes the date of an appended message is created at
+		// build time, in the build machine's zone (UTC), while the computer runs in another one. This puts
+		// the formatter in a zone other than the default one, as on a computer outside UTC, during the send.
+		// GreenMail, in the same JVM, writes the dates it stores with that same formatter, so what it would
+		// read back proves nothing: the APPEND command the client sends is checked instead.
+		var field = Class.forName("org.eclipse.angus.mail.imap.protocol.INTERNALDATE").getDeclaredField("df");
+		field.setAccessible(true);
+		var formatter = (SimpleDateFormat) field.get(null);
+		var formatterZone = formatter.getTimeZone();
+		var defaultIsUtc = TimeZone.getDefault().getOffset(System.currentTimeMillis()) == 0;
+		service.createFolder(ACCOUNT, "Sent");
+		try (var proxy = new CuttableProxy(IMAP)) {
+			var proxied = service(proxy.port(), SMTP, 60, OFF, Optional.empty());
+			var before = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+			EmailService.SentCopy copy;
+			try {
+				formatter.setTimeZone(TimeZone.getTimeZone(defaultIsUtc ? "Europe/Berlin" : "UTC"));
+				copy = proxied.sendEmail(ACCOUNT, "someone@example.com", null, null, "Zoned copy", "hello",
+						EmailService.NOT_CANCELLED);
+			} finally {
+				formatter.setTimeZone(formatterZone);
+			}
+			var after = Instant.now();
+
+			assertTrue(copy.saved(), copy.report());
+			var append = proxy.sent().lines().filter(line -> line.contains(" APPEND ")).findFirst().orElseThrow();
+			var date = java.util.regex.Pattern
+					.compile("\"(\\d{1,2}-[A-Za-z]{3}-\\d{4} \\d{2}:\\d{2}:\\d{2} [+-]\\d{4})\"").matcher(append);
+			if (date.find()) {
+				var filed = new SimpleDateFormat("dd-MMM-yyyy HH:mm:ss Z", java.util.Locale.US).parse(date.group(1))
+						.toInstant();
+				assertFalse(filed.isBefore(before) || filed.isAfter(after.plusSeconds(1)),
+						"the copy is filed with the date " + date.group(1) + " (" + filed + "), sent between " + before
+								+ " and " + after + ": " + append);
+			}
+			// Without a date, the server records the time it files the copy.
 		}
 	}
 
@@ -756,6 +817,23 @@ class PacedSendTest {
 		}
 	}
 
+	/** Flags a message \Deleted without expunging it, as a mail client that purges later does. */
+	private static void flagDeleted(String folderName, String subject) throws Exception {
+		try (var store = connect(IMAP)) {
+			var folder = store.getFolder(folderName);
+			folder.open(Folder.READ_WRITE);
+			try {
+				for (var m : folder.getMessages()) {
+					if (subject.equals(m.getSubject())) {
+						m.setFlag(Flags.Flag.DELETED, true);
+					}
+				}
+			} finally {
+				folder.close(false);
+			}
+		}
+	}
+
 	/** The message with this subject, as another client sees it on the server. */
 	private static <T> T inFolder(String folderName, String subject, MessageReader<T> reader) throws Exception {
 		try (var store = connect(IMAP)) {
@@ -826,13 +904,15 @@ class PacedSendTest {
 	}
 
 	/**
-	 * Stands between the service and the IMAP server, and drops every connection on demand: the
-	 * client then sees what it would if the server closed an idle connection.
+	 * Stands between the service and the IMAP server, keeps what the client sends, and drops every
+	 * connection on demand: the client then sees what it would if the server closed an idle
+	 * connection.
 	 */
 	private static final class CuttableProxy implements AutoCloseable {
 		private final ServerSocket server = new ServerSocket(0);
 		private final List<Socket> sockets = new CopyOnWriteArrayList<>();
 		private final ExecutorService threads = Executors.newCachedThreadPool();
+		private final ByteArrayOutputStream fromClient = new ByteArrayOutputStream();
 		private final int target;
 
 		CuttableProxy(int target) throws IOException {
@@ -844,6 +924,13 @@ class PacedSendTest {
 			return server.getLocalPort();
 		}
 
+		/** Everything the clients have sent so far. */
+		String sent() {
+			synchronized (fromClient) {
+				return fromClient.toString(StandardCharsets.ISO_8859_1);
+			}
+		}
+
 		private void accept() {
 			while (!server.isClosed()) {
 				try {
@@ -851,17 +938,28 @@ class PacedSendTest {
 					var upstream = new Socket("localhost", target);
 					sockets.add(client);
 					sockets.add(upstream);
-					threads.submit(() -> pump(client, upstream));
-					threads.submit(() -> pump(upstream, client));
+					threads.submit(() -> pump(client, upstream, fromClient));
+					threads.submit(() -> pump(upstream, client, null));
 				} catch (IOException e) {
 					return;
 				}
 			}
 		}
 
-		private static void pump(Socket from, Socket to) {
+		private static void pump(Socket from, Socket to, ByteArrayOutputStream copy) {
 			try {
-				from.getInputStream().transferTo(to.getOutputStream());
+				var in = from.getInputStream();
+				var out = to.getOutputStream();
+				var buffer = new byte[8192];
+				int n;
+				while ((n = in.read(buffer)) >= 0) {
+					if (copy != null) {
+						synchronized (copy) {
+							copy.write(buffer, 0, n);
+						}
+					}
+					out.write(buffer, 0, n);
+				}
 			} catch (IOException e) {
 				// The connection was dropped.
 			}

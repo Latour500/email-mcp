@@ -1122,7 +1122,7 @@ public class EmailService {
 	 * read. A failure is returned, never thrown: the message is already sent, and the send must
 	 * still be reported as such.
 	 */
-	private SentCopy saveToSent(String account, Message message, PacedImapConnection.MailSupplier<Store> store) {
+	private SentCopy saveToSent(String account, MimeMessage message, PacedImapConnection.MailSupplier<Store> store) {
 		String sentName = null;
 		try {
 			if (!getAccountConfig(account).saveToSent()) {
@@ -1138,7 +1138,7 @@ public class EmailService {
 			sentFolder.open(Folder.READ_WRITE);
 			try {
 				message.setFlag(Flags.Flag.SEEN, true);
-				sentFolder.appendMessages(new Message[] {message});
+				sentFolder.appendMessages(new Message[] {undated(message)});
 			} finally {
 				sentFolder.close(false);
 			}
@@ -1146,6 +1146,23 @@ public class EmailService {
 		} catch (Exception e) {
 			return SentCopy.failed(sentName, e.getMessage() != null ? e.getMessage() : e.getClass().getName());
 		}
+	}
+
+	/**
+	 * The message to file, identical but with no date to give the server, which then records the
+	 * time it files the copy. Given the Date header, Jakarta Mail would write it with a formatter
+	 * created when its class was initialized, but with the offset of the current time zone. In the
+	 * native image that class is initialized at build time, on a machine in UTC, so on a computer
+	 * one hour ahead of UTC the copy was filed an hour early, and the pause between messages read
+	 * back from the Sent folder after a restart came out an hour short.
+	 */
+	private static MimeMessage undated(MimeMessage message) throws MessagingException {
+		return new MimeMessage(message) {
+			@Override
+			public Date getSentDate() {
+				return null;
+			}
+		};
 	}
 
 	// ── Send pacing ──────────────────────────────────────────────────────

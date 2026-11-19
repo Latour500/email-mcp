@@ -29,13 +29,16 @@
 package se.hirt.mcp.mail;
 
 import jakarta.mail.FetchProfile;
+import jakarta.mail.Flags;
 import jakarta.mail.Folder;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
 import jakarta.mail.Store;
 import jakarta.mail.internet.InternetAddress;
 import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.search.AndTerm;
 import jakarta.mail.search.ComparisonTerm;
+import jakarta.mail.search.FlagTerm;
 import jakarta.mail.search.ReceivedDateTerm;
 import se.hirt.mcp.mail.SendPacing.SentRecord;
 import se.hirt.mcp.mail.SendPacing.SentSummary;
@@ -110,7 +113,8 @@ final class PacedImapConnection implements SendPacing.SentLog, AutoCloseable {
 	 * Counts the messages filed in the Sent folder since {@code countSince}, and finds the latest
 	 * one filed since {@code latestSince}, by the time the server filed them (INTERNALDATE). IMAP
 	 * searches by whole days, in the server's time zone, so the search starts a day early and the
-	 * exact times are compared here.
+	 * exact times are compared here. A message flagged \Deleted is left out: a mail client that
+	 * deletes a message often only flags it, and expunges it later.
 	 */
 	@Override
 	public SentSummary read(Instant countSince, Instant latestSince) throws MessagingException {
@@ -138,7 +142,8 @@ final class PacedImapConnection implements SendPacing.SentLog, AutoCloseable {
 		try {
 			var earliest = countSince.isBefore(latestSince) ? countSince : latestSince;
 			var since = Date.from(earliest.minus(Duration.ofDays(1)));
-			var messages = folder.search(new ReceivedDateTerm(ComparisonTerm.GE, since));
+			var messages = folder.search(new AndTerm(new ReceivedDateTerm(ComparisonTerm.GE, since),
+					new FlagTerm(new Flags(Flags.Flag.DELETED), false)));
 			var fp = new FetchProfile();
 			fp.add(FetchProfile.Item.ENVELOPE);
 			folder.fetch(messages, fp);
